@@ -74,6 +74,11 @@ COPY src/core/facts/world-knowledge.ts   /root/.bun/install/global/node_modules/
 COPY src/core/facts/consensus-refresh.ts /root/.bun/install/global/node_modules/gbrain/src/core/facts/consensus-refresh.ts
 COPY src/core/cycle/propose-takes.ts     /root/.bun/install/global/node_modules/gbrain/src/core/cycle/propose-takes.ts
 COPY src/commands/takes.ts               /root/.bun/install/global/node_modules/gbrain/src/commands/takes.ts
+# gpt-5.5 thinking (sp1a-v17) — upstream's native openai recipe allow-lists only
+# gpt-5.2/gpt-4o-mini, so resolveRecipe('openai:gpt-5.5') threw and think/dream/
+# subagent fell back to "no LLM available". Overlay the patched recipe so gpt-5.5
+# is allow-listed for chat + expansion. Reasoning then runs on openai:gpt-5.5.
+COPY src/core/ai/recipes/openai.ts       /root/.bun/install/global/node_modules/gbrain/src/core/ai/recipes/openai.ts
 
 EXPOSE 3000
 
