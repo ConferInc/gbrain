@@ -386,6 +386,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   private readonly dcrDisabled: boolean;
   private tokenTtl: number;
   private refreshTtl: number;
+  // #authz federated-union: cache of public (federated:true) source ids,
+  // unioned into every source-scoped client's read scope. Short TTL — sources
+  // change rarely and this is consulted on the token-verify hot path.
+  private _federatedSourceIds: { ids: string[]; at: number } | null = null;
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -580,6 +584,28 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   // Token Verification
   // -------------------------------------------------------------------------
 
+  /**
+   * #authz federated-union: the set of PUBLIC (federated:true) source ids.
+   * Unioned into a source-scoped client's read scope so public sources are
+   * readable by everyone (the `federated` flag is the single source of truth
+   * for "public"). Cached 60s; degrades to [] on error (grants no extra access).
+   */
+  private async getFederatedSourceIds(): Promise<string[]> {
+    const now = Date.now();
+    if (this._federatedSourceIds && now - this._federatedSourceIds.at < 60_000) {
+      return this._federatedSourceIds.ids;
+    }
+    let ids: string[] = [];
+    try {
+      const rows = await this.sql`SELECT id FROM sources WHERE (config->>'federated') = 'true'`;
+      ids = (rows as Array<Record<string, unknown>>).map((r) => String(r.id));
+    } catch {
+      ids = [];
+    }
+    this._federatedSourceIds = { ids, at: now };
+    return ids;
+  }
+
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const tokenHash = hashToken(token);
     const now = Math.floor(Date.now() / 1000);
@@ -652,9 +678,21 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       // array vs undefined matters: empty array = explicit no-federated-
       // read; undefined = column missing on this brain.
       const federatedRaw = row.federated_read;
-      const allowedSources = Array.isArray(federatedRaw)
+      let allowedSources = Array.isArray(federatedRaw)
         ? (federatedRaw as string[])
         : undefined;
+      // #authz federated-union: a source-scoped client (allowedSources defined)
+      // must ALSO read every PUBLIC (federated:true) source — that is what
+      // "federated" means. Admin/unrestricted clients (allowedSources undefined)
+      // already read all sources, so they need no union. This makes federated:true
+      // the single source of truth for "public" (new public sources auto-propagate),
+      // and it fixes "federated sources unreachable via MCP retrieval".
+      if (allowedSources !== undefined) {
+        const fed = await this.getFederatedSourceIds();
+        if (fed.length > 0) {
+          allowedSources = Array.from(new Set([...allowedSources, ...fed]));
+        }
+      }
       return {
         token,
         clientId: row.client_id as string,
