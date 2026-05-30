@@ -597,8 +597,20 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     }
     let ids: string[] = [];
     try {
-      const rows = await this.sql`SELECT id FROM sources WHERE (config->>'federated') = 'true'`;
-      ids = (rows as Array<Record<string, unknown>>).map((r) => String(r.id));
+      // Evaluate `federated` in JS, mirroring sources-ops.ts parseConfig/isFederated:
+      // `config` may be stored as a JSON-encoded STRING (not a jsonb object), in
+      // which case the SQL `config->>'federated'` predicate returns NULL and
+      // silently misses the source. Parsing here matches how sources_list reads it.
+      const rows = await this.sql`SELECT id, config FROM sources`;
+      for (const r of rows as Array<Record<string, unknown>>) {
+        let cfg: unknown = r.config;
+        if (typeof cfg === 'string') {
+          try { cfg = JSON.parse(cfg); } catch { cfg = {}; }
+        }
+        if (cfg && typeof cfg === 'object' && (cfg as Record<string, unknown>).federated === true) {
+          ids.push(String(r.id));
+        }
+      }
     } catch {
       ids = [];
     }
