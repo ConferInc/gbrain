@@ -443,6 +443,42 @@ export function crossSourceScope(ctx: OperationContext): { sourceId?: string; so
   return sourceScopeOpts(ctx);
 }
 
+/**
+ * Read scope for an op that accepts an explicit `source_id`. Closes the
+ * explicit-source authorization bypass (sibling of the `__all__` bypass): a
+ * remote, source-scoped client passing `source_id: "X"` was previously honored
+ * with `{sourceId: X}` UNCHECKED, letting it read any source it named (e.g.
+ * `hr-restricted`).
+ *   - no param        → caller's default scope (`sourceScopeOpts`)
+ *   - '__all__'       → `crossSourceScope` (bounded to authorized sources)
+ *   - explicit source → allowed ONLY if the caller may read it: it is in
+ *     `allowedSources` (which — post oauth-provider federated-union — includes
+ *     every federated/public source) OR the caller is admin/local. Otherwise
+ *     throws `permission_denied` rather than honoring an unauthorized filter.
+ */
+export function resolveReadScope(
+  ctx: OperationContext,
+  sourceIdParam: string | undefined,
+): { sourceId?: string; sourceIds?: string[] } {
+  if (sourceIdParam === undefined) return sourceScopeOpts(ctx);
+  if (sourceIdParam === '__all__') return crossSourceScope(ctx);
+  if (ctx.remote === false) return { sourceId: sourceIdParam }; // local: OS is the boundary
+  const allowed = ctx.auth?.allowedSources;
+  if (allowed && allowed.length > 0) {
+    if (!allowed.includes(sourceIdParam)) {
+      throw new Error(`permission_denied: not authorized to read source '${sourceIdParam}'`);
+    }
+    return { sourceId: sourceIdParam };
+  }
+  if (ctx.sourceId) {
+    if (sourceIdParam !== ctx.sourceId) {
+      throw new Error(`permission_denied: not authorized to read source '${sourceIdParam}'`);
+    }
+    return { sourceId: sourceIdParam };
+  }
+  return { sourceId: sourceIdParam }; // unrestricted (admin / no source binding)
+}
+
 export interface Operation {
   name: string;
   description: string;
@@ -1425,12 +1461,10 @@ const query: Operation = {
     // Explicit per-call source_id must win over ctx.sourceId. The special
     // __all__ value opts out of source filtering for local cross-source search.
     const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
-    const querySourceScope =
-      sourceIdParam !== undefined
-        ? sourceIdParam === '__all__'
-          ? crossSourceScope(ctx) // SECURITY: bound __all__ to authorized sources, not {} (whole brain)
-          : { sourceId: sourceIdParam }
-        : sourceScopeOpts(ctx);
+    // SECURITY: bound __all__ to authorized sources AND validate an explicit
+    // source_id against the caller's read scope (resolveReadScope throws
+    // permission_denied for an unauthorized source rather than honoring it).
+    const querySourceScope = resolveReadScope(ctx, sourceIdParam);
 
     // v0.27.1: image-similarity branch. Bypasses hybridSearch (which is
     // text-only); embeds the image via embedMultimodal and runs a direct
@@ -3650,18 +3684,15 @@ const code_callers: Operation = {
     const limit = (p.limit as number) ?? 100;
     const allSourcesParam = p.all_sources === true;
     const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
-    // SECURITY (#authz): honor a cross-source request only for callers
-    // authorized for it — local CLI or unrestricted/admin clients (where
-    // crossSourceScope returns {}). A source-scoped remote client is bounded
-    // to its own scope rather than escaping to every source in the brain.
-    const cross = crossSourceScope(ctx);
-    const unrestricted = cross.sourceId === undefined && cross.sourceIds === undefined;
-    const allSources = (allSourcesParam || sourceIdParam === '__all__') && unrestricted;
-    const sourceId = allSources
-      ? undefined
-      : sourceIdParam !== undefined && sourceIdParam !== '__all__'
-        ? sourceIdParam
-        : cross.sourceId ?? ctx.sourceId;
+    // SECURITY (#authz): validate explicit source + bound __all__/all_sources.
+    // getCallersOf/getCalleesOf take a scalar sourceId + allSources bool; a
+    // federated multi-source scope (scoped __all__) is pinned to the caller's
+    // primary source, and unauthorized explicit sources throw.
+    const effParam = allSourcesParam ? '__all__' : sourceIdParam;
+    const scope = resolveReadScope(ctx, effParam);
+    const unrestricted = scope.sourceId === undefined && scope.sourceIds === undefined;
+    const allSources = unrestricted && effParam === '__all__';
+    const sourceId = allSources ? undefined : (scope.sourceId ?? ctx.sourceId);
     const edges = await ctx.engine.getCallersOf(symbol, {
       limit,
       allSources,
@@ -3687,18 +3718,15 @@ const code_callees: Operation = {
     const limit = (p.limit as number) ?? 100;
     const allSourcesParam = p.all_sources === true;
     const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
-    // SECURITY (#authz): honor a cross-source request only for callers
-    // authorized for it — local CLI or unrestricted/admin clients (where
-    // crossSourceScope returns {}). A source-scoped remote client is bounded
-    // to its own scope rather than escaping to every source in the brain.
-    const cross = crossSourceScope(ctx);
-    const unrestricted = cross.sourceId === undefined && cross.sourceIds === undefined;
-    const allSources = (allSourcesParam || sourceIdParam === '__all__') && unrestricted;
-    const sourceId = allSources
-      ? undefined
-      : sourceIdParam !== undefined && sourceIdParam !== '__all__'
-        ? sourceIdParam
-        : cross.sourceId ?? ctx.sourceId;
+    // SECURITY (#authz): validate explicit source + bound __all__/all_sources.
+    // getCallersOf/getCalleesOf take a scalar sourceId + allSources bool; a
+    // federated multi-source scope (scoped __all__) is pinned to the caller's
+    // primary source, and unauthorized explicit sources throw.
+    const effParam = allSourcesParam ? '__all__' : sourceIdParam;
+    const scope = resolveReadScope(ctx, effParam);
+    const unrestricted = scope.sourceId === undefined && scope.sourceIds === undefined;
+    const allSources = unrestricted && effParam === '__all__';
+    const sourceId = allSources ? undefined : (scope.sourceId ?? ctx.sourceId);
     const edges = await ctx.engine.getCalleesOf(symbol, {
       limit,
       allSources,
@@ -3911,17 +3939,12 @@ const search_by_image: Operation = {
     );
 
     // Resolve source-scope (D5 canonical thread).
-    // SECURITY (#authz): __all__ is bounded to authorized sources. Unrestricted
-    // (local/admin) → undefined (true cross-source); a source-scoped remote
-    // client is pinned to its own scope, never the whole brain.
-    const imgCross = crossSourceScope(ctx);
-    const imgUnrestricted = imgCross.sourceId === undefined && imgCross.sourceIds === undefined;
-    const resolvedSourceId =
-      sourceIdParam !== undefined
-        ? sourceIdParam === '__all__'
-          ? (imgUnrestricted ? undefined : (imgCross.sourceId ?? ctx.sourceId))
-          : sourceIdParam
-        : ctx.sourceId;
+    // SECURITY (#authz): validate an explicit source + bound __all__.
+    // searchByImage takes a scalar sourceId; a federated multi-source scope
+    // (scoped __all__) is pinned to the caller's primary source (can't be
+    // represented scalar), and unauthorized explicit sources throw.
+    const imgScope = resolveReadScope(ctx, sourceIdParam);
+    const resolvedSourceId = imgScope.sourceId ?? (imgScope.sourceIds ? ctx.sourceId : undefined);
 
     const { searchByImage } = await import('./search/by-image.ts');
     const results = await searchByImage(
