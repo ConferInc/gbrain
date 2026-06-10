@@ -5186,6 +5186,118 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  // ─── Confer overlay migrations (116-119) ──────────────────────────────────
+  // RENUMBERED from 108-110 on the 0.42.38 rebase: upstream master claimed
+  // versions 108-115 (pages_embedding_signature → op_checkpoint_paths) after
+  // Confer's overlay had already shipped its own 108-110 to production. The
+  // runner tracks a SINGLE scalar `config.version`, so a prod brain that
+  // applied CONFER 108-110 reports version=110 and would silently SKIP
+  // upstream's real 108-110. Migration 116 heals that exact collision; 117-119
+  // are Confer's three, re-versioned. All idempotent + additive. The annotated
+  // source-of-record lives in src/migrations/000{2,3,4}_confer_*.sql;
+  // 0001_confer_rls is intentionally NOT auto-run (see its header).
+  {
+    version: 116,
+    name: 'confer_collision_heal_upstream_108_110',
+    // CONFER: re-apply upstream 108/109/110 DDL idempotently. On a Confer
+    // production brain (version=110 via the OLD Confer numbering) the runner
+    // skipped upstream's 108 (pages.embedding_signature), 109
+    // (sources.newest_content_at) and 110 (page_aliases). On a fresh brain
+    // (or any brain that ran upstream's own 108-110) every statement no-ops.
+    // SQL mirrors upstream v108/v109/v110 verbatim — keep in sync if upstream
+    // edits those entries (they are historical, so they shouldn't change).
+    idempotent: true,
+    sql: `
+      ALTER TABLE pages ADD COLUMN IF NOT EXISTS embedding_signature TEXT NULL;
+      ALTER TABLE sources ADD COLUMN IF NOT EXISTS newest_content_at TIMESTAMPTZ;
+      CREATE TABLE IF NOT EXISTS page_aliases (
+        id          BIGSERIAL PRIMARY KEY,
+        source_id   TEXT NOT NULL,
+        alias_norm  TEXT NOT NULL,
+        slug        TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT page_aliases_uniq UNIQUE (source_id, alias_norm, slug)
+      );
+      CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
+        ON page_aliases (source_id, alias_norm);
+      CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
+        ON page_aliases (source_id, slug);
+    `,
+  },
+  {
+    version: 117,
+    name: 'confer_epistemology_columns',
+    // Confer fork (spec §6.4), formerly v108: take_proposals.world_consensus
+    // (nightly-cached value of the confer_world_consensus view),
+    // take_proposals.relayed_by (Sherpa-style relay, distinct from acted_by),
+    // pages.schema_pack_version. Additive, both engines. Idempotent — no-ops
+    // on prod brains that already ran it as old-108.
+    idempotent: true,
+    sql: `
+      ALTER TABLE take_proposals
+        ADD COLUMN IF NOT EXISTS world_consensus REAL DEFAULT 0.0
+        CHECK (world_consensus BETWEEN 0 AND 1);
+      ALTER TABLE take_proposals
+        ADD COLUMN IF NOT EXISTS relayed_by TEXT;
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS schema_pack_version TEXT;
+      CREATE INDEX IF NOT EXISTS pages_pack_version_idx ON pages(schema_pack_version);
+    `,
+  },
+  {
+    version: 118,
+    name: 'confer_world_consensus_view',
+    // Confer fork (spec §6.4), formerly v109: derived consensus signal. A
+    // nightly minion job refreshes take_proposals.world_consensus from this
+    // view. Postgres-only (FILTER + JSONB ->> + ::float); no-op on PGLite
+    // local code-search brains. CREATE OR REPLACE — safe re-run on prod.
+    idempotent: true,
+    sql: '',
+    sqlFor: {
+      postgres: `
+        CREATE OR REPLACE VIEW confer_world_consensus AS
+        SELECT
+          tp.id AS take_proposal_id,
+          COUNT(DISTINCT agree.holder)
+            FILTER (WHERE agree.status = 'accepted') AS holder_agreement_count,
+          AVG(cp.brier)
+            FILTER (WHERE agree.status = 'accepted') AS avg_holder_brier,
+          MAX((s.config->>'tier_weight')::float) AS max_source_tier,
+          LEAST(1.0,
+            (COUNT(DISTINCT agree.holder)
+               FILTER (WHERE agree.status = 'accepted'))::float / 3.0
+            * COALESCE(MAX((s.config->>'tier_weight')::float), 0.5)
+            * (1.0 - COALESCE(AVG(cp.brier)
+               FILTER (WHERE agree.status = 'accepted'), 0.5))
+          ) AS world_consensus
+        FROM take_proposals tp
+        LEFT JOIN take_proposals agree
+          ON agree.claim_text = tp.claim_text
+          AND agree.id != tp.id
+        LEFT JOIN calibration_profiles cp
+          ON cp.holder = agree.holder
+          AND cp.source_id = agree.source_id
+        LEFT JOIN sources s
+          ON s.id = tp.source_id
+        GROUP BY tp.id;
+      `,
+    },
+  },
+  {
+    version: 119,
+    name: 'confer_source_config_keys',
+    // Confer fork (spec §6.5), formerly v110: documents Confer-reserved
+    // sources.config JSONB keys (tier_weight, allowed_judges, ingest_adapter)
+    // via COMMENT. Doc-only. Postgres-only; no-op on PGLite.
+    idempotent: true,
+    sql: '',
+    sqlFor: {
+      postgres: `
+        COMMENT ON COLUMN sources.config IS
+        'JSONB config blob. Confer-reserved keys (additive to upstream gbrain keys): tier_weight (REAL 0..1) source-tier weighting for confer_world_consensus view, default 0.5; allowed_judges (TEXT[]) cross-modal eval judges allowed per spec 6.5 tenant firewall; ingest_adapter (TEXT) gbrain ingestion adapter name. Upstream gbrain may add its own keys; Confer keys are namespaced via this comment.';
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

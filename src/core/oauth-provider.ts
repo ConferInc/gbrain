@@ -235,6 +235,41 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
     // is operator-trusted).
     assertAllowedScopes(parseScopeString(client.scope));
 
+    // sp1a-v10 SECURITY (DCR privilege-escalation seal): Dynamic Client
+    // Registration is reachable by ANY unauthenticated network caller when
+    // --enable-dcr is on. Pre-fix, registerClient persisted client.scope
+    // VERBATIM — a self-registering client could request `scope: "admin"`
+    // (or write / sources_admin / users_admin / agent) and the brain would
+    // grant it, with no operator in the loop. Two live "MCP CLI Proxy"
+    // clients self-registered with `write` this way.
+    //
+    // Fix: CLAMP every DCR-registered client to READ-ONLY at the source. A
+    // self-registered client may observe (read) but never mutate (write) or
+    // administer (admin/*_admin) the brain, and never dispatch agents
+    // (agent). Operators who legitimately need a write/admin client register
+    // it deliberately via the CLI (`gbrain auth register-client`) or the
+    // authenticated admin endpoint — both of which are operator-trusted and
+    // unaffected by this clamp. To widen a DCR client later, an operator
+    // re-scopes it explicitly via the CLI.
+    //
+    // This is defense-in-depth: even with DCR disabled at the serve flag
+    // (sp1a-v10 ships --enable-dcr OFF), the hole is now structurally closed
+    // so re-enabling DCR can never re-open the escalation path.
+    // Always read-only, regardless of what the caller requested. We log the
+    // downgrade when the caller asked for more so operators can audit DCR
+    // attempts that wanted elevated scope.
+    const clampedScope = 'read';
+    const requestedScopeStr = (client.scope || '').trim();
+    if (requestedScopeStr && requestedScopeStr !== clampedScope) {
+      try {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[oauth][dcr] client "${client.client_name || 'unnamed'}" requested scope "${requestedScopeStr}"; ` +
+            `clamped to "${clampedScope}" (DCR clients are read-only — re-scope via CLI if write/admin is needed).`,
+        );
+      } catch { /* best effort */ }
+    }
+
     // v0.41.3 (T5): validate token_endpoint_auth_method on the DCR path so
     // `--enable-dcr` is not the looser entry point. CLI and admin paths gate
     // through the same `validateTokenEndpointAuthMethod` helper — all three
@@ -272,7 +307,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
         VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
                 ${pgArray((client.redirect_uris || []).map(String))},
                 ${pgArray(client.grant_types || ['client_credentials'])},
-                ${client.scope || ''}, ${authMethod},
+                ${clampedScope}, ${authMethod},
                 ${now}, ${'default'}, ${pgArray(['default'])})
       `;
     } catch (err) {
@@ -285,7 +320,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
             VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
                     ${pgArray((client.redirect_uris || []).map(String))},
                     ${pgArray(client.grant_types || ['client_credentials'])},
-                    ${client.scope || ''}, ${authMethod},
+                    ${clampedScope}, ${authMethod},
                     ${now}, ${'default'})
           `;
         } catch (err2) {
@@ -297,7 +332,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
               VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
                       ${pgArray((client.redirect_uris || []).map(String))},
                       ${pgArray(client.grant_types || ['client_credentials'])},
-                      ${client.scope || ''}, ${authMethod},
+                      ${clampedScope}, ${authMethod},
                       ${now})
             `;
           } else {
@@ -312,7 +347,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
           VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
                   ${pgArray((client.redirect_uris || []).map(String))},
                   ${pgArray(client.grant_types || ['client_credentials'])},
-                  ${client.scope || ''}, ${authMethod},
+                  ${clampedScope}, ${authMethod},
                   ${now})
         `;
       } else {
@@ -329,6 +364,12 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
       ...client,
       client_id: clientId,
       client_id_issued_at: now,
+      // Echo the CLAMPED scope, not the requested one. The DB row + all token
+      // issuance use clampedScope ('read'); spreading `...client` would report
+      // the caller's requested scope (e.g. 'write'), so a 201 would claim a
+      // grant the client doesn't actually have, then surprise it with
+      // permission_denied at runtime. Keep the registration response truthful.
+      scope: clampedScope,
     };
     if (clientSecret) response.client_secret = clientSecret;
     return response;
@@ -345,6 +386,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   private readonly dcrDisabled: boolean;
   private tokenTtl: number;
   private refreshTtl: number;
+  // #authz federated-union: cache of public (federated:true) source ids,
+  // unioned into every source-scoped client's read scope. Short TTL — sources
+  // change rarely and this is consulted on the token-verify hot path.
+  private _federatedSourceIds: { ids: string[]; at: number } | null = null;
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -539,6 +584,40 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   // Token Verification
   // -------------------------------------------------------------------------
 
+  /**
+   * #authz federated-union: the set of PUBLIC (federated:true) source ids.
+   * Unioned into a source-scoped client's read scope so public sources are
+   * readable by everyone (the `federated` flag is the single source of truth
+   * for "public"). Cached 60s; degrades to [] on error (grants no extra access).
+   */
+  private async getFederatedSourceIds(): Promise<string[]> {
+    const now = Date.now();
+    if (this._federatedSourceIds && now - this._federatedSourceIds.at < 60_000) {
+      return this._federatedSourceIds.ids;
+    }
+    let ids: string[] = [];
+    try {
+      // Evaluate `federated` in JS, mirroring sources-ops.ts parseConfig/isFederated:
+      // `config` may be stored as a JSON-encoded STRING (not a jsonb object), in
+      // which case the SQL `config->>'federated'` predicate returns NULL and
+      // silently misses the source. Parsing here matches how sources_list reads it.
+      const rows = await this.sql`SELECT id, config FROM sources`;
+      for (const r of rows as Array<Record<string, unknown>>) {
+        let cfg: unknown = r.config;
+        if (typeof cfg === 'string') {
+          try { cfg = JSON.parse(cfg); } catch { cfg = {}; }
+        }
+        if (cfg && typeof cfg === 'object' && (cfg as Record<string, unknown>).federated === true) {
+          ids.push(String(r.id));
+        }
+      }
+    } catch {
+      ids = [];
+    }
+    this._federatedSourceIds = { ids, at: now };
+    return ids;
+  }
+
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const tokenHash = hashToken(token);
     const now = Math.floor(Date.now() / 1000);
@@ -611,9 +690,21 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       // array vs undefined matters: empty array = explicit no-federated-
       // read; undefined = column missing on this brain.
       const federatedRaw = row.federated_read;
-      const allowedSources = Array.isArray(federatedRaw)
+      let allowedSources = Array.isArray(federatedRaw)
         ? (federatedRaw as string[])
         : undefined;
+      // #authz federated-union: a source-scoped client (allowedSources defined)
+      // must ALSO read every PUBLIC (federated:true) source — that is what
+      // "federated" means. Admin/unrestricted clients (allowedSources undefined)
+      // already read all sources, so they need no union. This makes federated:true
+      // the single source of truth for "public" (new public sources auto-propagate),
+      // and it fixes "federated sources unreachable via MCP retrieval".
+      if (allowedSources !== undefined) {
+        const fed = await this.getFederatedSourceIds();
+        if (fed.length > 0) {
+          allowedSources = Array.from(new Set([...allowedSources, ...fed]));
+        }
+      }
       return {
         token,
         clientId: row.client_id as string,

@@ -25,17 +25,17 @@ export const openai: Recipe = {
       max_batch_tokens: 100_000,
     },
     expansion: {
-      models: ['gpt-5.2', 'gpt-4o-mini'],
+      models: ['gpt-5.5', 'gpt-5.2', 'gpt-4o-mini'],
       cost_per_1m_tokens_usd: 0.15,
       price_last_verified: '2026-04-20',
     },
     chat: {
-      models: ['gpt-5.2', 'gpt-4o-mini'],
+      models: ['gpt-5.5', 'gpt-5.2', 'gpt-4o-mini'],
       supports_tools: true,
       supports_subagent_loop: true,
       supports_prompt_cache: false,
       max_context_tokens: 200000,
-      cost_per_1m_input_usd: 1.25, // gpt-5.2 baseline
+      cost_per_1m_input_usd: 1.25, // gpt-5.2 baseline; gpt-5.5 added to allow-list (Confer)
       cost_per_1m_output_usd: 10.0,
       price_last_verified: '2026-04-20',
     },
