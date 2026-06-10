@@ -5618,6 +5618,225 @@ export const MIGRATIONS: Migration[] = [
         ON take_proposals (source_id, page_slug, content_hash, prompt_version, md5(claim_text));
     `,
   },
+  {
+    version: 126,
+    name: 'confer_collision_heal_upstream_116_119',
+    // RENUMBERED COLLISION (2nd occurrence — see v127's header, formerly
+    // v116, for the first). On the 0.42.67 rebase, upstream master claimed
+    // versions 116-119 for its own real migrations (code_edges backfill,
+    // context_volunteer_events, page-generation clock sequence swap,
+    // op_checkpoints array-check) AFTER Confer's overlay had already shipped
+    // its own private 116-119 to production under the 0.42.38 rebase. A
+    // Confer prod brain reports config.version=119 today (via Confer's OLD
+    // numbering) and would silently SKIP upstream's real 116-119 DDL. This
+    // migration re-applies that DDL idempotently, mirroring upstream's own
+    // SQL verbatim (source: src/core/migrate.ts version 116-119 entries at
+    // gbrain-upgrade-pin-0.42.68.1 f84bfb57 [RT4-REPIN: was c6dc0adf, byte-identical
+    // re-verified at this pin — gbrain-upgrade-0.42.67
+    // evidence/upstream-repin-f84bfb57.md §3] — keep in sync if upstream
+    // edits them; they are historical, so they shouldn't change). On a brain that already ran
+    // upstream's real 116-119 (fresh installs, or any brain rebased after
+    // this fix), every statement below no-ops.
+    idempotent: true,
+    sql: `
+      UPDATE code_edges_symbol e
+         SET source_id = COALESCE(p.source_id, 'default')
+        FROM content_chunks c
+        JOIN pages p ON p.id = c.page_id
+       WHERE c.id = e.from_chunk_id
+         AND e.source_id IS NULL;
+
+      UPDATE code_edges_chunk e
+         SET source_id = COALESCE(p.source_id, 'default')
+        FROM content_chunks c
+        JOIN pages p ON p.id = c.page_id
+       WHERE c.id = e.from_chunk_id
+         AND e.source_id IS NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_code_edges_symbol_from_symbol
+        ON code_edges_symbol (from_symbol_qualified);
+
+      CREATE INDEX IF NOT EXISTS idx_code_edges_chunk_from_symbol
+        ON code_edges_chunk (from_symbol_qualified);
+
+      CREATE TABLE IF NOT EXISTS context_volunteer_events (
+        id             BIGSERIAL PRIMARY KEY,
+        source_id      TEXT NOT NULL,
+        slug           TEXT NOT NULL,
+        confidence     DOUBLE PRECISION NOT NULL,
+        match_arm      TEXT NOT NULL,
+        rationale      TEXT NOT NULL DEFAULT '',
+        channel        TEXT NOT NULL DEFAULT 'op',
+        session_id     TEXT,
+        turn           INTEGER,
+        volunteered_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS context_volunteer_events_src_time_idx
+        ON context_volunteer_events (source_id, volunteered_at DESC);
+      CREATE INDEX IF NOT EXISTS context_volunteer_events_src_slug_idx
+        ON context_volunteer_events (source_id, slug);
+
+      CREATE SEQUENCE IF NOT EXISTS page_generation_clock_seq;
+
+      SELECT setval('page_generation_clock_seq', GREATEST(
+        1,
+        COALESCE((SELECT last_value FROM page_generation_clock_seq), 0),
+        COALESCE((SELECT value FROM page_generation_clock WHERE id = 1), 0),
+        COALESCE((SELECT MAX(generation) FROM pages), 0)
+      ));
+
+      CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
+      BEGIN
+        PERFORM nextval('page_generation_clock_seq');
+        RETURN NULL;
+      END;
+      $func$ LANGUAGE plpgsql;
+
+      -- [RT5-FREEZE P1 Step 4.5 Codex catch] NOT part of upstream's original v118 body — a
+      -- deliberate ADDITION beyond the verbatim replay. Upstream's real v118
+      -- (page_generation_clock_sequence_swap) runs BEFORE v120
+      -- (schema_lint_hardening_search_path_security_invoker) in upstream's own migration
+      -- order, so v120 hardens this exact function afterward there. Here, this heal
+      -- migration runs at v126 -- AFTER v120 in every brain's migration order -- so a
+      -- byte-verbatim replay of v118's CREATE OR REPLACE (which carries no SET search_path)
+      -- would silently STRIP the v120 hardening on any brain where this migration actually
+      -- does work (any Confer prod brain that never ran upstream's real v116-119). CREATE OR
+      -- REPLACE FUNCTION resets ALL function properties, including proconfig, unless the new
+      -- definition repeats them. Re-apply the hardening immediately, mirroring v120's own
+      -- ALTER FUNCTION pattern for this exact function name:
+      ALTER FUNCTION public.bump_page_generation_clock_fn()
+        SET search_path = pg_catalog, public;
+
+      DROP TRIGGER IF EXISTS bump_page_generation_clock_trg ON pages;
+      CREATE TRIGGER bump_page_generation_clock_trg
+        AFTER INSERT OR UPDATE OR DELETE ON pages
+        FOR EACH STATEMENT
+        EXECUTE FUNCTION bump_page_generation_clock_fn();
+
+      DELETE FROM query_cache;
+
+      LOCK TABLE op_checkpoints IN SHARE ROW EXCLUSIVE MODE;
+
+      UPDATE op_checkpoints
+         SET completed_keys = '[]'::jsonb, updated_at = now()
+       WHERE jsonb_typeof(completed_keys) <> 'array';
+
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+           WHERE conname = 'op_checkpoints_completed_keys_array'
+             AND conrelid = 'op_checkpoints'::regclass
+        ) THEN
+          ALTER TABLE op_checkpoints
+            ADD CONSTRAINT op_checkpoints_completed_keys_array
+            CHECK (jsonb_typeof(completed_keys) = 'array');
+        END IF;
+      END $$;
+    `,
+  },
+  {
+    version: 127,
+    name: 'confer_collision_heal_upstream_108_110',
+    // CONFER: re-apply upstream 108/109/110 DDL idempotently. On a Confer
+    // production brain (version=110 via the OLD Confer numbering) the runner
+    // skipped upstream's 108 (pages.embedding_signature), 109
+    // (sources.newest_content_at) and 110 (page_aliases). On a fresh brain
+    // (or any brain that ran upstream's own 108-110) every statement no-ops.
+    // SQL mirrors upstream v108/v109/v110 verbatim — keep in sync if upstream
+    // edits those entries (they are historical, so they shouldn't change).
+    idempotent: true,
+    sql: `
+      ALTER TABLE pages ADD COLUMN IF NOT EXISTS embedding_signature TEXT NULL;
+      ALTER TABLE sources ADD COLUMN IF NOT EXISTS newest_content_at TIMESTAMPTZ;
+      CREATE TABLE IF NOT EXISTS page_aliases (
+        id          BIGSERIAL PRIMARY KEY,
+        source_id   TEXT NOT NULL,
+        alias_norm  TEXT NOT NULL,
+        slug        TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT page_aliases_uniq UNIQUE (source_id, alias_norm, slug)
+      );
+      CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
+        ON page_aliases (source_id, alias_norm);
+      CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
+        ON page_aliases (source_id, slug);
+    `,
+  },
+  {
+    version: 128,
+    name: 'confer_epistemology_columns',
+    // Confer fork (spec §6.4), formerly v108: take_proposals.world_consensus
+    // (nightly-cached value of the confer_world_consensus view),
+    // take_proposals.relayed_by (Sherpa-style relay, distinct from acted_by),
+    // pages.schema_pack_version. Additive, both engines. Idempotent — no-ops
+    // on prod brains that already ran it as old-108.
+    idempotent: true,
+    sql: `
+      ALTER TABLE take_proposals
+        ADD COLUMN IF NOT EXISTS world_consensus REAL DEFAULT 0.0
+        CHECK (world_consensus BETWEEN 0 AND 1);
+      ALTER TABLE take_proposals
+        ADD COLUMN IF NOT EXISTS relayed_by TEXT;
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS schema_pack_version TEXT;
+      CREATE INDEX IF NOT EXISTS pages_pack_version_idx ON pages(schema_pack_version);
+    `,
+  },
+  {
+    version: 129,
+    name: 'confer_world_consensus_view',
+    // Confer fork (spec §6.4), formerly v109: derived consensus signal. A
+    // nightly minion job refreshes take_proposals.world_consensus from this
+    // view. Postgres-only (FILTER + JSONB ->> + ::float); no-op on PGLite
+    // local code-search brains. CREATE OR REPLACE — safe re-run on prod.
+    idempotent: true,
+    sql: '',
+    sqlFor: {
+      postgres: `
+        CREATE OR REPLACE VIEW confer_world_consensus AS
+        SELECT
+          tp.id AS take_proposal_id,
+          COUNT(DISTINCT agree.holder)
+            FILTER (WHERE agree.status = 'accepted') AS holder_agreement_count,
+          AVG(cp.brier)
+            FILTER (WHERE agree.status = 'accepted') AS avg_holder_brier,
+          MAX((s.config->>'tier_weight')::float) AS max_source_tier,
+          LEAST(1.0,
+            (COUNT(DISTINCT agree.holder)
+               FILTER (WHERE agree.status = 'accepted'))::float / 3.0
+            * COALESCE(MAX((s.config->>'tier_weight')::float), 0.5)
+            * (1.0 - COALESCE(AVG(cp.brier)
+               FILTER (WHERE agree.status = 'accepted'), 0.5))
+          ) AS world_consensus
+        FROM take_proposals tp
+        LEFT JOIN take_proposals agree
+          ON agree.claim_text = tp.claim_text
+          AND agree.id != tp.id
+        LEFT JOIN calibration_profiles cp
+          ON cp.holder = agree.holder
+          AND cp.source_id = agree.source_id
+        LEFT JOIN sources s
+          ON s.id = tp.source_id
+        GROUP BY tp.id;
+      `,
+    },
+  },
+  {
+    version: 130,
+    name: 'confer_source_config_keys',
+    // Confer fork (spec §6.5), formerly v110: documents Confer-reserved
+    // sources.config JSONB keys (tier_weight, allowed_judges, ingest_adapter)
+    // via COMMENT. Doc-only. Postgres-only; no-op on PGLite.
+    idempotent: true,
+    sql: '',
+    sqlFor: {
+      postgres: `
+        COMMENT ON COLUMN sources.config IS
+        'JSONB config blob. Confer-reserved keys (additive to upstream gbrain keys): tier_weight (REAL 0..1) source-tier weighting for confer_world_consensus view, default 0.5; allowed_judges (TEXT[]) cross-modal eval judges allowed per spec 6.5 tenant firewall; ingest_adapter (TEXT) gbrain ingestion adapter name. Upstream gbrain may add its own keys; Confer keys are namespaced via this comment.';
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

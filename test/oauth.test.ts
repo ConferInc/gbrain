@@ -140,6 +140,64 @@ describe('client registration', () => {
     ).rejects.toThrow();
   });
 
+  // sp1a-v10 DCR privilege-escalation seal: the DCR /register path
+  // (clientsStore.registerClient) must CLAMP self-registered clients to
+  // read-only, regardless of the scope the unauthenticated caller requested.
+  // Pre-fix this stored client.scope verbatim, so a self-registration with
+  // `scope: "admin"` (or write) was granted in full — the live "MCP CLI Proxy"
+  // clients self-registered with `write` exactly this way.
+  //
+  // [RT5-FREEZE P1 4.4 note] These 3 tests conflicted with upstream's NEW
+  // `registerClientManual persists submit_agent bindings` test purely on
+  // insertion proximity (both land right after 'duplicate client_id is
+  // rejected', inside the same describe block) — a pure addition on both
+  // sides, no shared line modified. Kept BOTH per the plan's decision table.
+  test('DCR registerClient clamps requested admin scope to read-only', async () => {
+    const store = provider.clientsStore as unknown as {
+      registerClient: (c: any) => Promise<{ client_id: string }>;
+    };
+    const reg = await store.registerClient({
+      client_name: 'evil-dcr-admin',
+      redirect_uris: ['https://example.com/cb'],
+      grant_types: ['authorization_code'],
+      scope: 'admin write sources_admin users_admin agent read',
+      token_endpoint_auth_method: 'none',
+    });
+    const client = await provider.clientsStore.getClient(reg.client_id);
+    expect(client).toBeDefined();
+    // Stored scope must be read-only — every elevated scope dropped.
+    expect(client!.scope).toBe('read');
+  });
+
+  test('DCR registerClient clamps a plain write request to read-only', async () => {
+    const store = provider.clientsStore as unknown as {
+      registerClient: (c: any) => Promise<{ client_id: string }>;
+    };
+    const reg = await store.registerClient({
+      client_name: 'dcr-write-attempt',
+      redirect_uris: ['https://example.com/cb'],
+      grant_types: ['authorization_code'],
+      scope: 'read write',
+      token_endpoint_auth_method: 'none',
+    });
+    const client = await provider.clientsStore.getClient(reg.client_id);
+    expect(client!.scope).toBe('read');
+  });
+
+  test('DCR registerClient with no scope defaults to read', async () => {
+    const store = provider.clientsStore as unknown as {
+      registerClient: (c: any) => Promise<{ client_id: string }>;
+    };
+    const reg = await store.registerClient({
+      client_name: 'dcr-no-scope',
+      redirect_uris: ['https://example.com/cb'],
+      grant_types: ['authorization_code'],
+      token_endpoint_auth_method: 'none',
+    });
+    const client = await provider.clientsStore.getClient(reg.client_id);
+    expect(client!.scope).toBe('read');
+  });
+
   test('registerClientManual persists submit_agent bindings when supplied', async () => {
     const { clientId } = await provider.registerClientManual(
       'bound-agent', ['client_credentials'], 'read agent', [], 'default', undefined, undefined, {
@@ -208,7 +266,19 @@ describe('rescopeClient', () => {
 
     const authInfo = await provider.verifyAccessToken(tokens.access_token) as unknown as CoreAuthInfo;
     expect(authInfo.sourceId).toBe('wiki');
-    expect(authInfo.allowedSources).toEqual(['wiki', 'essays']);
+    // [RT5-FREEZE P1 Step 7 fix] This is upstream's own new test (rescopeClient, #1914),
+    // written without the Confer fork's pre-existing federated-union behavior in
+    // verifyAccessToken (P1 §4.2): for any source-scoped (non-admin) client, allowedSources
+    // is additionally unioned with every PUBLIC (federated:true) source on the brain. This
+    // test's shared DB seeds 'default' as federated:true (see
+    // test/local-federated-search-scope.test.ts's own comment: "Seeded 'default' source is
+    // federated=true"), so a rescoped client's allowedSources correctly includes it here —
+    // this is intentional fork behavior, not a regression, and predates this rebase. Assert
+    // the explicitly-granted sources are present rather than exact array equality, so this
+    // test doesn't re-couple to which OTHER sources happen to be globally federated in the
+    // shared test fixture.
+    expect(authInfo.allowedSources).toEqual(expect.arrayContaining(['wiki', 'essays']));
+    expect(authInfo.allowedSources).toContain('default'); // federated-union of the seeded public source
   });
 
   test('partial rescope leaves the other axis untouched', async () => {

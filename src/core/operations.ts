@@ -29,6 +29,7 @@ import { stampEvidence } from './search/evidence.ts';
 import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS, PAGE_SLUG_SEG } from './cjk.ts';
 import { ALL_SOURCES } from './source-id.ts';
+import { hasScope } from './scope.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import {
@@ -572,8 +573,28 @@ export function resolveRequestedScope(
     if (ctx.remote !== false && allowed && allowed.length > 0 && !allowed.includes(sourceIdParam)) {
       throw new OperationError(
         'permission_denied',
-        `source '${sourceIdParam}' is outside your granted sources`,
+        `permission_denied: not authorized to read source '${sourceIdParam}' (outside your granted sources)`,
         'Request access to this source, or omit source_id to search within your grant.',
+      );
+    }
+    // CONFER HARDENING (#authz, confer/main 41ee71a8 + 1e5235f0; kept on the
+    // 0.42.38 rebase): a remote caller bound only by a scalar `ctx.sourceId`
+    // (no federated `allowedSources` grant) must NOT read an arbitrary
+    // explicit source by naming it. Upstream's check above only fires when a
+    // federated grant exists; this closes the scalar-bound sibling. Local CLI
+    // (`remote === false`) and callers with NO source binding at all keep the
+    // unrestricted behavior (admin / tests). This preserves the semantics
+    // Confer production has enforced since sp1a (resolveReadScope).
+    if (
+      ctx.remote !== false &&
+      (!allowed || allowed.length === 0) &&
+      ctx.sourceId &&
+      sourceIdParam !== ctx.sourceId
+    ) {
+      throw new OperationError(
+        'permission_denied',
+        `permission_denied: not authorized to read source '${sourceIdParam}'`,
+        'Omit source_id to read within your own source, or request a federated grant for this source.',
       );
     }
     return { sourceId: sourceIdParam };
@@ -618,6 +639,31 @@ export function federatedSearchScope(
     return { sourceIds: ctx.localFederatedSourceIds };
   }
   return scope;
+}
+
+/**
+ * CONFER compat shims (sp1a security wave, confer/main 41ee71a8/1e5235f0).
+ * The Confer fork shipped `crossSourceScope` / `resolveReadScope` before
+ * upstream landed the equivalent `resolveRequestedScope` (#1999). Upstream's
+ * resolver is now canonical; these aliases keep Confer call sites and tests
+ * (test/cross-source-scope-authz.test.ts) working. Do not add new callers —
+ * use `resolveRequestedScope` directly.
+ *
+ * [RT5-FREEZE P1 4.3 note] This block conflicted with upstream's new
+ * `federatedSearchScope` above purely on insertion proximity (both land
+ * immediately after `resolveRequestedScope`) — not a content collision.
+ * Kept BOTH, upstream's function first, ours after, matching the plan's
+ * "pure additions, no upstream overlap risk" characterization of this pair.
+ */
+export function crossSourceScope(ctx: OperationContext): { sourceId?: string; sourceIds?: string[] } {
+  return resolveRequestedScope(ctx, '__all__');
+}
+
+export function resolveReadScope(
+  ctx: OperationContext,
+  sourceIdParam: string | undefined,
+): { sourceId?: string; sourceIds?: string[] } {
+  return resolveRequestedScope(ctx, sourceIdParam);
 }
 
 /**
@@ -857,6 +903,13 @@ const put_page: Operation = {
     slug: { type: 'string', required: true, description: 'Page slug' },
     content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
     allow_empty: { type: 'boolean', required: false, description: 'Allow overwriting an existing non-empty page with empty/whitespace-only content (default: false). Without it, put_page rejects the empty overwrite — the empty-stdin failure class.' },
+    // sp1a-v10 (CONFER): optional per-write source selector. Lets an admin /
+    // sources_admin-scoped client target ANY source on the brain instead of
+    // being pinned to its token's own `source_id`. PERMISSION-GATED in the
+    // handler: a non-admin client may only pass `source` equal to its OWN
+    // ctx.sourceId (no privilege escalation — a tenant-A token cannot write
+    // into tenant-B). Omitted → unchanged behavior (writes to ctx.sourceId).
+    source: { type: 'string', required: false, description: 'sp1a-v10: target source id for this write. Admin/sources_admin only (or equal to your own source). Omitted → your token source.' },
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
     // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
     // MCP callers (ctx.remote !== false) have their values OVERRIDDEN with
@@ -905,7 +958,46 @@ const put_page: Operation = {
     // enforceSubagentSlugFence for the fail-closed policy.
     enforceSubagentSlugFence(ctx, slug, 'put_page');
 
-    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
+    // sp1a-v10 (CONFER): per-write source selector. Resolve the source this
+    // write targets. Default (no `source` param) is unchanged: ctx.sourceId —
+    // the token's own source. When `source` IS supplied, gate it so a client
+    // cannot escalate out of its own tenant:
+    //
+    //   - admin / sources_admin scope  → may target ANY source.
+    //   - any other scope              → may ONLY target its OWN ctx.sourceId
+    //                                     (passing your own source is a no-op,
+    //                                     but accepted so callers can be explicit).
+    //
+    // Local CLI callers (ctx.remote === false) have no OAuth scope boundary —
+    // the trust boundary there is the OS — so they may target any source, the
+    // same way every other scope-gated op (purge_deleted_pages, submit_agent)
+    // bypasses scope enforcement for local callers.
+    //
+    // [RT5-FREEZE P1 4.3 note] Computed BEFORE the dry-run check and the
+    // empty-overwrite guard (moved up from its original conflict position)
+    // so both can use it — the dry-run response echoes the resolved target,
+    // and the guard below reads the WRITE TARGET's existing page, not the
+    // caller's own source (see the guard's own comment for why that matters).
+    let writeSourceId: string | undefined = ctx.sourceId;
+    const requestedSource = p.source as string | undefined;
+    if (typeof requestedSource === 'string' && requestedSource.length > 0) {
+      const scopes = ctx.auth?.scopes ?? [];
+      const isAdminScoped =
+        hasScope(scopes, 'admin') || hasScope(scopes, 'sources_admin');
+      const isOwnSource = ctx.sourceId !== undefined && requestedSource === ctx.sourceId;
+      const isLocalTrusted = ctx.remote === false;
+      if (isAdminScoped || isOwnSource || isLocalTrusted) {
+        writeSourceId = requestedSource;
+      } else {
+        throw new OperationError(
+          'permission_denied',
+          `put_page: writing to source '${requestedSource}' requires 'admin' or 'sources_admin' scope (your token is scoped to source '${ctx.sourceId ?? 'default'}').`,
+          "Omit `source` to write to your own source, or use an admin-scoped token to target another source.",
+        );
+      }
+    }
+
+    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug, source: writeSourceId };
 
     // Empty-overwrite guard: empty/whitespace-only content over an existing
     // non-empty page is almost always an input-plumbing failure (e.g. a
@@ -916,8 +1008,18 @@ const put_page: Operation = {
     // write below targets (engine.putPage defaults to 'default' when
     // sourceId is unset). New-slug creates and soft-deleted-page overwrites
     // stay allowed — nothing recoverable is lost there.
+    //
+    // CONFER ADAPTATION: reads the WRITE-TARGET source (writeSourceId), not
+    // ctx.sourceId, so an admin-scoped caller overriding `source` gets the
+    // empty-overwrite check against the source it's actually about to write
+    // into — not its own token's source. Without this, an admin write
+    // targeting a foreign source would run the check against the caller's
+    // OWN source instead of the target: false-positive (blocks a legitimate
+    // empty-overwrite on the target) or false-negative (silently allows
+    // clobbering a non-empty page on the target because the caller's own
+    // source happened to have no matching slug).
     if ((p.content as string).trim() === '' && p.allow_empty !== true) {
-      const existing = await ctx.engine.getPage(slug, { sourceId: ctx.sourceId ?? 'default' });
+      const existing = await ctx.engine.getPage(slug, { sourceId: writeSourceId ?? 'default' });
       const existingBody = existing
         ? `${existing.compiled_truth ?? ''}\n${existing.timeline ?? ''}`.trim()
         : '';
@@ -929,7 +1031,6 @@ const put_page: Operation = {
         );
       }
     }
-
     // Skip embedding when the AI gateway has no embedding provider configured.
     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
@@ -951,7 +1052,9 @@ const put_page: Operation = {
       const resolved = await loadActivePack({
         cfg: loadConfig(),
         remote: ctx.remote === false ? false : true,
-        sourceId: ctx.sourceId,
+        // sp1a-v10 (CONFER): pack resolution follows the resolved WRITE source
+        // so type inference honors the target source's configured page_types.
+        sourceId: writeSourceId,
       });
       activePack = { page_types: resolved.manifest.page_types };
     } catch {
@@ -964,7 +1067,9 @@ const put_page: Operation = {
       // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
       // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
       remote: ctx.remote !== false,
-      ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+      // sp1a-v10 (CONFER): write to the resolved source (== ctx.sourceId
+      // unless an admin-scoped caller supplied an explicit `source`).
+      ...(writeSourceId ? { sourceId: writeSourceId } : {}),
       // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
       // inferType behavior when undefined).
       ...(activePack ? { activePack } : {}),
@@ -1027,7 +1132,8 @@ const put_page: Operation = {
     const isSandboxSubagent = ctx.viaSubagent === true
       && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
     if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
-      const sourceId = ctx.sourceId ?? 'default';
+      // sp1a-v10 (CONFER): write-through follows the resolved WRITE source.
+      const sourceId = writeSourceId ?? 'default';
       const provenanceVia = ctx.remote === false ? 'put_page' : 'mcp:put_page';
       // Shared canonical write-through (also used by `gbrain brainstorm/lsd
       // --save`). Renders the file from the saved DB row and writes it
@@ -1080,7 +1186,7 @@ const put_page: Operation = {
       try {
         const enabled = await isAutoLinkEnabled(ctx.engine);
         if (enabled) {
-          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, ctx.sourceId ? { sourceId: ctx.sourceId } : undefined);
+          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, writeSourceId ? { sourceId: writeSourceId } : undefined);
         }
       } catch (e) {
         autoLinks = { error: e instanceof Error ? e.message : String(e) };
@@ -1095,11 +1201,18 @@ const put_page: Operation = {
           const fullContent = result.parsedPage.compiled_truth + '\n' + result.parsedPage.timeline;
           const entries = parseTimelineEntries(fullContent);
           if (entries.length > 0) {
+            // [RT5-FREEZE P1 4.5 Codex catch] source_id was never set here — pre-existing on
+            // confer/rebase-0.42.38, predates this rebase, but now directly relevant to the
+            // writeSourceId feature: without it, every auto-extracted timeline entry silently
+            // attributes to 'default' regardless of which source the write actually targeted
+            // (see TimelineBatchInput's own doc: "Without this, two pages sharing the same
+            // slug across sources would fan out timeline rows to both").
             const batch = entries.map(e => ({
               slug,
               date: e.date,
               summary: e.summary,
               detail: e.detail || '',
+              source_id: writeSourceId ?? 'default',
             }));
             // v0.41.18.0: engine self-retries on Supavisor circuit-breaker
             // recovery. auditSite label routes the audit JSONL emission so
@@ -1138,7 +1251,8 @@ const put_page: Operation = {
         },
         {
           engine: ctx.engine,
-          sourceId: ctx.sourceId ?? 'default',
+          // sp1a-v10 (CONFER): facts backstop banks against the WRITE source.
+          sourceId: writeSourceId ?? 'default',
           sessionId: (ctx as { source_session?: string }).source_session ?? null,
           source: 'mcp:put_page',
           mode: 'queue',
@@ -1180,7 +1294,13 @@ const put_page: Operation = {
             compiled_truth: result.parsedPage.compiled_truth,
             frontmatter: result.parsedPage.frontmatter,
           },
-          { engine: ctx.engine, sourceId: ctx.sourceId ?? 'default' },
+          // [RT5-FREEZE P1 4.5 Codex catch, site #7] Life Chronicle backstop (#2390) is an
+          // upstream addition from the 23-commit drift window (same class as site #6,
+          // runPostWriteLint) that auto-merged silently with no conflict marker, leaving the
+          // pre-writeSourceId ctx.sourceId. Fixed for the same reason as site #6: an admin
+          // write targeting a different source via `source` must bank chronicle extraction
+          // against the write target, not the caller's own source.
+          { engine: ctx.engine, sourceId: writeSourceId ?? 'default' },
         );
         chronicleQueued = r.enqueued ? { queued: true } : { skipped: r.skipped ?? 'skipped' };
       } catch {
@@ -1196,8 +1316,14 @@ const put_page: Operation = {
     let writerLint: { error_count: number; warning_count: number } | { skipped: string } | undefined;
     try {
       const { runPostWriteLint } = await import('./output/post-write.ts');
+      // [RT5-FREEZE P1 4.3 note] Site #6 (RT4-REPIN, upstream dba0ae7b/#3667):
+      // this call auto-merged SILENTLY with no conflict marker, leaving the
+      // pre-writeSourceId `ctx.sourceId ?? 'default'`. Fixed by hand per the
+      // plan's explicit flag for this site — without the fix, an admin write
+      // targeting a different source via `source` would run post-write lint
+      // against the caller's own source instead of the actual write target.
       const lint = await runPostWriteLint(ctx.engine, result.slug, {
-        sourceId: ctx.sourceId ?? 'default',
+        sourceId: writeSourceId ?? 'default',
       });
       if (lint.ran) {
         writerLint = {
@@ -1215,6 +1341,10 @@ const put_page: Operation = {
       slug: result.slug,
       status: result.status === 'imported' ? 'created_or_updated' : result.status,
       chunks: result.chunks,
+      // sp1a-v10 (CONFER): echo the source this write landed in so callers
+      // (esp. admin multi-source agents passing an explicit `source`) can
+      // confirm the target.
+      ...(writeSourceId ? { source: writeSourceId } : {}),
       ...(autoLinks ? { auto_links: autoLinks } : {}),
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
       ...(writerLint ? { writer_lint: writerLint } : {}),
@@ -2821,6 +2951,15 @@ const resolve_slugs: Operation = {
     // slugs to any caller (the reporter's "resolve_slugs sees them but
     // get_page doesn't" matrix). Route through the same visibility set as
     // get_page/search: grant > federated set > scalar source.
+    //
+    // [RT5-FREEZE P1 4.3 note] Upstream independently fixed this exact
+    // vulnerability our overlay's own (now-removed) sourceScopeOpts(ctx)
+    // version targeted. Took upstream's federatedSearchScope(ctx) verbatim —
+    // strictly superior: it additionally widens an unqualified scalar scope
+    // to the transport-computed federated set, matching get_page/search/
+    // list_pages visibility exactly, which sourceScopeOpts(ctx) did not do.
+    // Do not merge the two; they solve the same problem via non-composable
+    // mechanisms.
     return ctx.engine.resolveSlugs(p.partial as string, federatedSearchScope(ctx));
   },
   scope: 'read',

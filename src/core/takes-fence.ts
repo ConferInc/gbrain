@@ -148,7 +148,12 @@ export function isValidHolder(holder: string): boolean {
   return HOLDER_REGEX.test(holder);
 }
 
-const KIND_VALUES: ReadonlySet<string> = new Set(['fact', 'take', 'bet', 'hunch']);
+// v0.42.0.0 — `world_knowledge` (Confer fork) added as a first-class kind so a
+// take that has graduated (escalated_from lineage + world_consensus ≥ 0.8, see
+// src/core/facts/world-knowledge.ts) round-trips through the fence. It is a
+// DERIVED kind — the LLM extraction path never proposes it; only the promotion
+// rule produces it — but persistence must accept it like any other kind.
+const KIND_VALUES: ReadonlySet<string> = new Set(['fact', 'take', 'bet', 'hunch', 'world_knowledge']);
 const QUALITY_VALUES: ReadonlySet<string> = new Set(['correct', 'incorrect', 'partial', 'unresolvable']);
 
 // v0.30.0: header tokens that mark a v0.30-shape fence. Presence of `quality`
@@ -309,7 +314,7 @@ export function parseTakesFence(body: string): ParseResult {
 
     const kind = kindRaw.trim().toLowerCase();
     if (!KIND_VALUES.has(kind)) {
-      warnings.push(`TAKES_TABLE_MALFORMED: unknown kind "${kindRaw}" (expected fact|take|bet|hunch)`);
+      warnings.push(`TAKES_TABLE_MALFORMED: unknown kind "${kindRaw}" (expected fact|take|bet|hunch|world_knowledge)`);
       continue;
     }
 
@@ -550,7 +555,7 @@ export function supersedeRow(
 export function stripTakesFence(body: string): string {
   // Pages without a compiled body (e.g. metadata-only rows from a read op)
   // have nothing to strip. Guard so the privacy strip is a safe no-op rather
-  // than crashing on `undefined.indexOf`.
+  // than crashing on `undefined.indexOf`. (upstream v0.42.x)
   if (typeof body !== 'string') return body;
   const beginIdx = body.indexOf(TAKES_FENCE_BEGIN);
   if (beginIdx === -1) return body;
