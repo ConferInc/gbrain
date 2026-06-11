@@ -294,10 +294,14 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
     const secretHash = clientSecret ? hashToken(clientSecret) : null;
     const now = Math.floor(Date.now() / 1000);
 
-    // v0.34.1 (#861, D2 + D13 + #876): DCR clients get source_id='default'
-    // (matches legacy fallback) and federated_read=['default'] (read scope
-    // == write scope). Operators who need narrower / wider scope rescope
-    // via the CLI later. Pre-v60/v61 brain falls through to the legacy
+    // Default-deny read scope: a newly registered client starts with
+    // federated_read=[] and gains source read access only when an admin
+    // grants it explicitly (`gbrain auth register-client --federated-read ...`
+    // or an UPDATE on oauth_clients). Previously this defaulted to ['default'],
+    // which granted read on the `default` source at registration time. The
+    // least-privilege default is empty so a fresh client can read nothing until
+    // it is scoped. source_id stays 'default' (write authority, gated by scope);
+    // only the read axis changes. Pre-v60/v61 brain falls through to the legacy
     // projection (no source_id / federated_read column yet).
     try {
       await this.sql`
@@ -308,7 +312,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
                 ${pgArray((client.redirect_uris || []).map(String))},
                 ${pgArray(client.grant_types || ['client_credentials'])},
                 ${clampedScope}, ${authMethod},
-                ${now}, ${'default'}, ${pgArray(['default'])})
+                ${now}, ${'default'}, ${pgArray([])})
       `;
     } catch (err) {
       if (isUndefinedColumnError(err, 'federated_read')) {
