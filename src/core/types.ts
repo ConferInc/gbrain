@@ -546,6 +546,14 @@ export interface ChunkInput {
   modality?: 'text' | 'image';
   embedding_image?: Float32Array;
   /**
+   * Code-path embedding isolation: a code-tuned vector (e.g. voyage-code-3,
+   * 1024-dim) for code chunks, stored in the `embedding_code` column so it
+   * doesn't collide with the global 1536-dim `embedding`. Set by importCodeFile
+   * only when the `code_embedding_model` config is configured; undefined
+   * otherwise. Mirrors `embedding_image`.
+   */
+  embedding_code?: Float32Array;
+  /**
    * v0.19.0: optional code-chunk metadata. Populated by importCodeFile from
    * the tree-sitter AST; NULL for markdown chunks. Drives `query --lang`,
    * `code-def`, `code-refs`, and the new searchCodeChunks engine method.

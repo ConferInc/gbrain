@@ -857,7 +857,19 @@ export async function importCodeFile(
   engine: BrainEngine,
   relativePath: string,
   content: string,
-  opts: { noEmbed?: boolean; force?: boolean; sourceId?: string } = {},
+  opts: {
+    noEmbed?: boolean;
+    force?: boolean;
+    sourceId?: string;
+    /**
+     * Code-path embedding isolation: the resolved `code_embedding_model`,
+     * passed by callers (e.g. reindex-code) so they resolve config ONCE per
+     * run instead of one DB round-trip per file. When undefined, importCodeFile
+     * reads config itself (back-compat for direct callers). Pass '' to mean
+     * "no code model" without a config read.
+     */
+    codeEmbeddingModel?: string;
+  } = {},
 ): Promise<ImportResult> {
   const slug = slugifyCodePath(relativePath);
   const lang = detectCodeLanguage(relativePath) || 'unknown';
@@ -941,6 +953,30 @@ export async function importCodeFile(
         const i = needsEmbedIndexes[j]!;
         chunks[i]!.embedding = embeddings[j]!;
         chunks[i]!.token_count = Math.ceil(chunks[i]!.chunk_text.length / 4);
+      }
+
+      // Code-path embedding isolation: when a code-tuned model is configured,
+      // ALSO embed these chunks with it into `embedding_code` (1024-dim). The
+      // default `embedding` above stays populated, so existing code search is
+      // unaffected; code-tuned search opts in via embedding_column='embedding_code'.
+      // Run reindex-code (force) to backfill the column for an existing source.
+      const codeModel = opts.codeEmbeddingModel !== undefined
+        ? (opts.codeEmbeddingModel || undefined)
+        : (await loadConfigWithEngine(engine, loadConfig() ?? undefined))?.code_embedding_model;
+      if (codeModel) {
+        try {
+          const codeVecs = await embedBatch(textsToEmbed, {
+            embeddingModel: codeModel,
+            dimensions: 1024,
+          });
+          for (let j = 0; j < needsEmbedIndexes.length; j++) {
+            chunks[needsEmbedIndexes[j]!]!.embedding_code = codeVecs[j]!;
+          }
+        } catch (ce: unknown) {
+          // Non-fatal: the default embedding already succeeded. A code-model
+          // hiccup leaves embedding_code NULL (search falls back to `embedding`).
+          console.warn(`[gbrain] code-model embedding failed for ${slug} (model=${codeModel}): ${ce instanceof Error ? ce.message : String(ce)}`);
+        }
       }
     } catch (e: unknown) {
       console.warn(`[gbrain] embedding failed for code file ${slug}: ${e instanceof Error ? e.message : String(e)}`);
