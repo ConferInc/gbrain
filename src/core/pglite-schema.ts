@@ -213,7 +213,10 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- v0.36 Phase 3 cross-modal: unified column populated by reindex
   -- (search.unified_multimodal=true routes here). Migration v75 adds it
   -- on upgrade; fresh installs land at head with the column present.
-  embedding_multimodal vector(1024)
+  embedding_multimodal vector(1024),
+  -- Code-path embedding isolation: 1024-dim code-tuned vectors for code
+  -- chunks (see schema.sql). Migration v111 adds it on upgrade.
+  embedding_code vector(1024)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);

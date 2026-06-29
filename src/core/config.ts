@@ -45,6 +45,16 @@ export interface GBrainConfig {
   embedding_model?: string;
   embedding_dimensions?: number;
   /**
+   * Code-path embedding isolation. When set (e.g. "voyage:voyage-code-3"),
+   * `importCodeFile` embeds code chunks with THIS model into the
+   * `embedding_code` column (1024-dim) instead of leaving code on the global
+   * `embedding_model`. Non-code content is untouched. Unset (default) = current
+   * behaviour exactly (code uses the global model in `embedding`). Pair with an
+   * `embedding_columns` registry entry for 'embedding_code' so code-scoped
+   * search can route to it via the `embedding_column` param.
+   */
+  code_embedding_model?: string;
+  /**
    * v0.37 (D9): user opted into deferred-setup mode at init time via
    * `gbrain init --no-embedding`. When true, embed callsites and `gbrain
    * import` refuse with a `gbrain config set embedding_model <id>` hint
@@ -453,6 +463,7 @@ export async function loadConfigWithEngine(
   // first use so a malformed DB row doesn't kill engine connect.
   const dbEmbeddingColumns = await dbStr('embedding_columns');
   const dbSearchEmbeddingColumn = await dbStr('search_embedding_column');
+  const dbCodeEmbeddingModel = await dbStr('code_embedding_model');
 
   // DB applies only when env did NOT win. Env presence is detected by the
   // sync loadConfig() already setting the field. For each flag, prefer the
@@ -484,6 +495,9 @@ export async function loadConfigWithEngine(
   }
   if (merged.search_embedding_column === undefined && dbSearchEmbeddingColumn !== undefined) {
     merged.search_embedding_column = dbSearchEmbeddingColumn;
+  }
+  if (merged.code_embedding_model === undefined && dbCodeEmbeddingModel !== undefined) {
+    merged.code_embedding_model = dbCodeEmbeddingModel;
   }
 
   // v0.41 content-sanity DB-plane merge (D1: lint lifts to read these

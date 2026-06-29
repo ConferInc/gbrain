@@ -5000,6 +5000,33 @@ export const MIGRATIONS: Migration[] = [
       `,
     },
   },
+  {
+    version: 111,
+    name: 'content_chunks_embedding_code',
+    // Code-path embedding isolation: a 1024-dim code-tuned column so code
+    // chunks (voyage-code-3) live apart from the global 1536-dim `embedding`
+    // (text-embedding-3). Mirrors the embedding_image dual-column pattern
+    // (migration v39). Nullable + additive: pre-migration rows have NULL and
+    // search keeps using `embedding` until `code_embedding_model` is configured
+    // and code is reindexed — zero behaviour change otherwise. Column + partial
+    // HNSW index are also in src/schema.sql / pglite-schema.ts so fresh installs
+    // get them natively.
+    idempotent: true,
+    sql: `
+      ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_code vector(1024);
+      CREATE INDEX IF NOT EXISTS idx_chunks_embedding_code
+        ON content_chunks USING hnsw (embedding_code vector_cosine_ops)
+        WHERE embedding_code IS NOT NULL;
+    `,
+    sqlFor: {
+      // PGLite lacks hnsw; the column alone is enough for parity (PGLite
+      // brings up vector search differently). Mirror the embedding_image
+      // PGLite handling: add the column, skip the hnsw index.
+      pglite: `
+        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_code vector(1024);
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

@@ -78,6 +78,18 @@ export interface EmbedBatchOptions {
    * and amplify rate-limit pressure.
    */
   maxRetries?: number;
+  /**
+   * Explicit `provider:model` override (forwarded to the gateway's
+   * EmbedOpts.embeddingModel). Used by the code-path embedding isolation so
+   * code chunks embed via a code-tuned model (e.g. 'voyage:voyage-code-3')
+   * into the `embedding_code` column. Absent = global default model.
+   */
+  embeddingModel?: string;
+  /**
+   * Explicit dimensions override, paired with `embeddingModel` (forwarded to
+   * the gateway's EmbedOpts.dimensions). Must match the destination column dim.
+   */
+  dimensions?: number;
 }
 
 /**
@@ -97,6 +109,8 @@ export async function embedBatch(
   const gwOpts = {
     ...(options.abortSignal !== undefined && { abortSignal: options.abortSignal }),
     ...(options.maxRetries !== undefined && { maxRetries: options.maxRetries }),
+    ...(options.embeddingModel !== undefined && { embeddingModel: options.embeddingModel }),
+    ...(options.dimensions !== undefined && { dimensions: options.dimensions }),
   };
   // Fast path: small batch, no progress callback — single gateway call.
   if (texts.length <= BATCH_SIZE && !options.onBatchComplete) {

@@ -286,7 +286,14 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   embedding_image       vector(1024),
   -- v0.36 Phase 3 cross-modal: unified column populated by reindex.
   -- Migration v75 also adds it for upgrade paths.
-  embedding_multimodal  vector(1024)
+  embedding_multimodal  vector(1024),
+  -- Code-path embedding isolation: a code-tuned model (e.g. voyage-code-3,
+  -- 1024-dim) embeds code chunks into this distinct column so non-code stays
+  -- on the global `embedding` (text-embedding-3, 1536). Populated only when the
+  -- `code_embedding_model` config is set; NULL otherwise (full back-compat).
+  -- Mirrors the embedding_image dual-column pattern. Migration v76 adds it for
+  -- upgrade paths; declared in the `embedding_columns` registry as 'embedding_code'.
+  embedding_code        vector(1024)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);
@@ -300,6 +307,11 @@ CREATE INDEX IF NOT EXISTS idx_chunks_language ON content_chunks(language) WHERE
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_image
   ON content_chunks USING hnsw (embedding_image vector_cosine_ops)
   WHERE embedding_image IS NOT NULL;
+-- Code-path isolation: partial HNSW for code embeddings. Footprint stays
+-- proportional to code-chunk count, not table size.
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_code
+  ON content_chunks USING hnsw (embedding_code vector_cosine_ops)
+  WHERE embedding_code IS NOT NULL;
 -- v0.20.0 Cathedral II: GIN index on the new chunk-grain FTS vector.
 CREATE INDEX IF NOT EXISTS idx_chunks_search_vector ON content_chunks USING GIN(search_vector);
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol_qualified
