@@ -291,7 +291,7 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- 1024-dim) embeds code chunks into this distinct column so non-code stays
   -- on the global `embedding` (text-embedding-3, 1536). Populated only when the
   -- `code_embedding_model` config is set; NULL otherwise (full back-compat).
-  -- Mirrors the embedding_image dual-column pattern. Migration v76 adds it for
+  -- Mirrors the embedding_image dual-column pattern. Migration v111 adds it for
   -- upgrade paths; declared in the `embedding_columns` registry as 'embedding_code'.
   embedding_code        vector(1024)
 );

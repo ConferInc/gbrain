@@ -5019,11 +5019,13 @@ export const MIGRATIONS: Migration[] = [
         WHERE embedding_code IS NOT NULL;
     `,
     sqlFor: {
-      // PGLite lacks hnsw; the column alone is enough for parity (PGLite
-      // brings up vector search differently). Mirror the embedding_image
-      // PGLite handling: add the column, skip the hnsw index.
+      // PGLite ships pgvector (incl. hnsw) in its WASM bundle (see migration
+      // v39 / embedding_image), so it gets the same column + partial index.
       pglite: `
         ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_code vector(1024);
+        CREATE INDEX IF NOT EXISTS idx_chunks_embedding_code
+          ON content_chunks USING hnsw (embedding_code vector_cosine_ops)
+          WHERE embedding_code IS NOT NULL;
       `,
     },
   },

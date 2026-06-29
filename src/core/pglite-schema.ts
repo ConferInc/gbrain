@@ -227,6 +227,10 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON content_chunks USING hnsw (em
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_image
   ON content_chunks USING hnsw (embedding_image vector_cosine_ops)
   WHERE embedding_image IS NOT NULL;
+-- Code-path isolation: partial HNSW for code embeddings (parity with schema.sql).
+CREATE INDEX IF NOT EXISTS idx_chunks_embedding_code
+  ON content_chunks USING hnsw (embedding_code vector_cosine_ops)
+  WHERE embedding_code IS NOT NULL;
 -- v0.19.0: partial indexes for code chunk lookups.
 CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON content_chunks(symbol_name) WHERE symbol_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chunks_language ON content_chunks(language) WHERE language IS NOT NULL;

@@ -27,6 +27,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { importCodeFile } from '../core/import-file.ts';
 import { estimateTokens } from '../core/chunkers/code.ts';
 import { getEmbeddingModelName, estimateEmbeddingCostUsd } from '../core/embedding.ts';
+import { loadConfig, loadConfigWithEngine } from '../core/config.ts';
 import { errorFor, serializeError } from '../core/errors.ts';
 import { createInterface } from 'readline';
 import { createProgress } from '../core/progress.ts';
@@ -241,6 +242,11 @@ export async function runReindexCode(
     };
   }
 
+  // Code-path embedding isolation: resolve the code model ONCE for the whole
+  // run (not per file) and thread it into each importCodeFile call.
+  const codeEmbeddingModel =
+    (await loadConfigWithEngine(engine, loadConfig() ?? undefined))?.code_embedding_model ?? '';
+
   // Walk every code page, re-run importCodeFile with compiled_truth as
   // the content source. relativePath comes from frontmatter.file (set by
   // the original importCodeFile call). Progress via stderr reporter.
@@ -300,6 +306,7 @@ export async function runReindexCode(
                 noEmbed: opts.noEmbed,
                 force: opts.force,
                 sourceId: opts.sourceId,
+                codeEmbeddingModel, // resolved once below (avoids a per-file DB read)
               });
               if (result.status === 'imported') reindexed++;
               else if (result.status === 'skipped') skipped++;
