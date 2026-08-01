@@ -47,8 +47,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin upstream for reproducible builds. Override with --build-arg UPSTREAM_REF=<sha>.
-# Default = the audited pin for this branch (upstream v0.42.38.0; see UPSTREAM.md).
-ARG UPSTREAM_REF=03ffc6ebdbc7dd8b29e5bfd0c3a9a6c983b54f01
+# Default = the audited pin for this branch (upstream v0.42.68.1; see UPSTREAM.md).
+ARG UPSTREAM_REF=f84bfb57f2ab9294ea9c4bb33e40dec75dab41bf
 RUN bun install -g "github:garrytan/gbrain#${UPSTREAM_REF}"
 
 # Confer schema pack (consumed by the CMD's `gbrain schema use confer-everything-v1`).
