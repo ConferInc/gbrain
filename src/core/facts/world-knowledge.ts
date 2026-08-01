@@ -12,7 +12,7 @@
  * the orchestrator / nightly consensus-refresh minion does the persistence):
  *
  *   - `world_consensus` is the nightly-cached value of the `confer_world_consensus`
- *     VIEW (migrate.ts v109 / src/migrations/0003). The view + the
+ *     VIEW (migrate.ts v129 confer_world_consensus_view — see P1 §1c, inline since the 0.42.67 rebase). The view + the
  *     take_proposals.world_consensus column already ship; the minion job that
  *     refreshes the column and re-kinds graduated rows is a separate supervised
  *     change and is intentionally out of scope here.

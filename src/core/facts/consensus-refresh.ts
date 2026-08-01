@@ -9,7 +9,7 @@
  *
  * What it does, in one idempotent pass over a source's `take_proposals`:
  *   (a) REFRESH `take_proposals.world_consensus` from the `confer_world_consensus`
- *       VIEW (migrate.ts v109 / src/migrations/0003). The view is the source of
+ *       VIEW (migrate.ts v129 confer_world_consensus_view — see P1 §1c, inline since the 0.42.67 rebase). The view is the source of
  *       truth; the column is a nightly cache. We copy view→column per proposal id.
  *   (b) PROMOTE: for every proposal whose page carries an `escalated_from`
  *       lineage link (the upstream `links` primitive with link_type
@@ -34,7 +34,7 @@
  *   - Postgres-only effect: `confer_world_consensus` is a Postgres view
  *     (FILTER + JSONB ->> + ::float). On a PGLite local/code-search brain the
  *     view does not exist; the pass no-ops with a clear skip reason rather than
- *     throwing (mirrors migrate.ts v109's `sqlFor.postgres`-only entry and the
+ *     throwing (mirrors migrate.ts v129's `sqlFor.postgres`-only entry and the
  *     `engine.kind === 'postgres'` guards in doctor.ts).
  *
  * LOCKING: takes the shared DB-backed lock (db-lock.ts, the same
@@ -64,7 +64,7 @@ import type { BrainEngine } from '../engine.ts';
 /**
  * The `escalated_from` link_type, declared by the confer-everything-v1 pack
  * over the upstream `links` primitive (NOT a column — see
- * src/migrations/0002_confer_epistemology.sql header). A take "has lineage"
+ * migrate.ts v128 confer_epistemology_columns header — inline since the 0.42.67 rebase, P1 §1c). A take "has lineage"
  * iff its page is the `from_page` of ≥1 link of this type.
  */
 export const ESCALATED_FROM_LINK_TYPE = 'escalated_from';

@@ -21,7 +21,7 @@ Quarterly. Aether (fork maintainer) runs:
 ```bash
 git fetch upstream
 git rebase upstream/master  # NOT upstream/main — gbrain default is master
-# resolve any conflicts with Confer migrations under src/migrations/
+# resolve any conflicts with Confer's inline migrations in src/core/migrate.ts
 bun test  # must pass before push
 git push --force-with-lease origin confer/main
 ```
@@ -35,10 +35,10 @@ Per Confer-OS spec §5 row 4:
 
 ## Confer-local additions (DO NOT remove on rebase)
 
-- `src/migrations/0001_confer_rls.sql` through `0004_confer_source_config_keys.sql`
-- `src/migrations/down/0001_*.down.sql` through `0004_*.down.sql`
-- `tests/migrations/*.test.ts`
-- `tests/load/*`
+Confer schema DDL lives inline in `src/core/migrate.ts` (entries v126-v130). There is no
+`src/migrations/` directory as of the 0.42.67 rebase — see gbrain-upgrade-0.42.67 P1 §1c.
+(The `tests/migrations/*.test.ts` and `tests/load/*` paths formerly listed here were confirmed
+by P0 §4.5 not to exist in this repo at all — removed as phantom entries, not relocated.)
 
 All other files track upstream exactly.
 

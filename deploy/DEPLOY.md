@@ -95,10 +95,15 @@ DB blips; the pinned UPSTREAM_REF includes it.
 (pgvector container) to `/root/confer-brain-backups/` (14-day retention). First
 dump verified (190 MB). Coolify's own backup only covers `coolify-db` metadata.
 
-## RLS (0001) — gated, NOT active
-`src/migrations/0001_confer_rls.sql` is intentionally not wired into the runner.
-It's inert under the current `confer_brain_admin` (superuser/BYPASSRLS) role and
-the `gbrain.allowed_sources` GUC is never set, so app-layer source scoping
-(operations.ts) is the real isolation. Activating requires: a non-BYPASSRLS app
-role + `SET LOCAL gbrain.allowed_sources` per request in serve-http + `WITH CHECK`
-on the policies. Treat as a deliberate, separately-tested change.
+## RLS — deleted as dead code (0.42.67 rebase, P1 §1c)
+The formerly-inert `src/migrations/0001_confer_rls.sql` (never wired into the runner, never
+executed on any brain) was deleted in the 0.42.67 rebase — P0 §4.5 confirmed it had no runtime
+reader and P0's live RLS-canonical-state check confirmed zero row-level policies exist on prod.
+Isolation is enforced entirely at the application layer (`resolveRequestedScope`/
+`sourceScopeOpts`/`federatedSearchScope` in `operations.ts` + OAuth token scoping in
+`oauth-provider.ts`). Upstream ships its own opt-in native RLS family
+(`app.scopes`/`GBRAIN_RLS_SCOPE_BINDING`, unset in every Confer env) — a standing `gbrain doctor`
+check (`confer_rls_family_collision`, P1 §1d) fails loudly if that knob is ever turned on while
+any row-level policy exists on the core tables, so the two RLS families can never silently
+coexist. Activating real DB-level RLS is a deliberate, separately-scoped, separately-tested
+future project — not something this history's git log preserves as a file to resurrect.
