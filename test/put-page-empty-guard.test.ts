@@ -149,7 +149,10 @@ describe('put_page empty-overwrite guard — allowed paths', () => {
     expect(page!.compiled_truth).toContain('Content that must survive.');
   });
 
-  test('case-variant slug with allow_empty still blanks the SAME (normalized) page, not a new one', async () => {
+  // NOTE (codex delta-gate #4): this is an ALLOWED-PATH INVARIANT, not a test that pins the
+  // case-normalization fix — importFromContent() already normalized, so it passes either way.
+  // It exists to prove the opt-in path targets the canonical row and fabricates no duplicate.
+  test('allow_empty via a case-variant slug blanks the SAME canonical page and creates no duplicate', async () => {
     await seedPage('inbox/case-variant-allow');
     const result = (await putPage.handler(makeCtx(), {
       slug: 'inbox/Case-Variant-ALLOW',
@@ -158,11 +161,30 @@ describe('put_page empty-overwrite guard — allowed paths', () => {
     })) as { status: string; slug: string };
     expect(result.status).toBe('created_or_updated');
     expect(result.slug).toBe('inbox/case-variant-allow');
-    // Exactly one row — the case variant must not have fabricated a second page.
+    // The canonical page is now blank — the opt-in actually took effect.
+    const page = await engine.getPage('inbox/case-variant-allow', { sourceId: 'default' });
+    expect((page!.compiled_truth ?? '').trim()).toBe('');
+    // Uniqueness is per (source_id, slug): scope the count to the source under test.
     const rows = await engine.executeRaw(
-      "SELECT slug FROM pages WHERE lower(slug) = 'inbox/case-variant-allow'",
+      "SELECT slug FROM pages WHERE lower(slug) = 'inbox/case-variant-allow' AND source_id = 'default'",
     );
     expect((rows as unknown as unknown[]).length).toBe(1);
+  });
+
+  test('dry_run previews the CANONICAL slug, not the raw input (codex delta-gate #3)', async () => {
+    await seedPage('inbox/dryrun-canonical');
+    const preview = (await putPage.handler(makeCtx({ dryRun: true }), {
+      slug: 'inbox/DryRun-CANONICAL',
+      content: 'anything',
+    })) as { dry_run: boolean; slug: string };
+    expect(preview.dry_run).toBe(true);
+    expect(preview.slug).toBe('inbox/dryrun-canonical');
+  });
+
+  test('an invalid slug fails as a structured OperationError, not a raw Error (codex delta-gate #1)', async () => {
+    await expect(
+      putPage.handler(makeCtx(), { slug: '/leading-slash-is-invalid', content: 'x' }),
+    ).rejects.toBeInstanceOf(OperationError);
   });
 
   test('guard is scoped to the write-target source — a non-empty page in another source does not block', async () => {

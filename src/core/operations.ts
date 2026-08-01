@@ -930,7 +930,15 @@ const put_page: Operation = {
     // putPage lowercased it, a case-variant slug ('Foo' vs 'foo') missed the lookup, the
     // guard did not fire, and the write then normalized and BLANKED the real page — the
     // exact D-I1 clobber class the guard exists to prevent. Proven on the staging clone.
-    const slug = validateSlug(p.slug as string);
+    // Wrapped: validateSlug throws a plain Error, but every caller-facing failure in an
+    // operation handler must be an OperationError or the MCP layer reports `internal_error`
+    // instead of a structured `invalid_params` (and the leading-slash contract test breaks).
+    let slug: string;
+    try {
+      slug = validateSlug(p.slug as string);
+    } catch (e) {
+      throw new OperationError('invalid_params', (e as Error).message);
+    }
 
     // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
     // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
@@ -1004,7 +1012,9 @@ const put_page: Operation = {
       }
     }
 
-    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug, source: writeSourceId };
+    // Preview the canonical slug (what execution actually targets), not the raw input —
+    // otherwise a dry run of 'inbox/Foo' advertises a different target than the real write.
+    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug, source: writeSourceId };
 
     // Empty-overwrite guard: empty/whitespace-only content over an existing
     // non-empty page is almost always an input-plumbing failure (e.g. a
