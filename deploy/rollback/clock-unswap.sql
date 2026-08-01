@@ -12,7 +12,12 @@ UPDATE page_generation_clock
 
 -- 2. Re-assert the legacy trigger body. The old image's own initSchema replay also does this,
 --    so this is belt-and-braces against ordering (script run before the old image boots).
-CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
+--    SET search_path is required here: v126 (src/core/migrate.ts) explicitly re-hardens this
+--    function with an ALTER FUNCTION ... SET search_path = pg_catalog, public after its own
+--    verbatim replay of upstream v118's body (which lacked it). A plain CREATE OR REPLACE
+--    FUNCTION with no search_path clause resets proconfig to unset, silently undoing that
+--    hardening the moment this rollback script runs (Codex gate 6, P1 Step 11 whole-phase).
+CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger SET search_path = pg_catalog, public AS $func$
 BEGIN
   UPDATE page_generation_clock SET value = value + 1 WHERE id = 1;
   RETURN NULL;

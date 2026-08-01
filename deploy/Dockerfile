@@ -72,10 +72,15 @@ COPY pack.yaml /opt/confer/pack.yaml
 #   oauth-provider.ts — DCR scope clamp/seal + truthful registration response +
 #                       federated-union of public sources (unchanged upstream
 #                       since the old pin; carried verbatim).
-#   migrate.ts        — Confer migrations RENUMBERED 108-110 → 117-119 (upstream
-#                       claimed 108-115) + v116 collision-heal that re-applies
-#                       upstream's 108-110 DDL on prod brains stuck at
-#                       config.version=110 under the OLD Confer numbering.
+#   migrate.ts        — [gbrain-upgrade-0.42.67] Confer migrations RENUMBERED again:
+#                       former Confer v117-119 -> v128-130; v126 is the new
+#                       confer_collision_heal_upstream_116_119 heal migration
+#                       (re-applies upstream's real v116-119 DDL verbatim, incl.
+#                       the search_path hardening ALTER FUNCTION, on brains that
+#                       already ran the OLD Confer numbering for that range);
+#                       v127 is confer_collision_heal_upstream_108_110 (carried
+#                       from the prior rebase, unchanged). Max version 130. See
+#                       P1 Step 4.1/4.1a/4.1b and evidence/p1/migration-renumber-verified.txt.
 COPY src/core/operations.ts     /root/.bun/install/global/node_modules/gbrain/src/core/operations.ts
 COPY src/core/oauth-provider.ts /root/.bun/install/global/node_modules/gbrain/src/core/oauth-provider.ts
 COPY src/core/migrate.ts        /root/.bun/install/global/node_modules/gbrain/src/core/migrate.ts
