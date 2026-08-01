@@ -972,6 +972,11 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   // File-plane only (no engine) — works on thin clients too.
   checks.push(checkSelfUpgradeHealth());
 
+  // 14. [Confer overlay] "Never both RLS families" — see gbrain-upgrade-0.42.67 P1 §1/§1d
+  // (D4b). Cross-surface parity with buildChecks() (local `gbrain doctor`), same pattern as
+  // checkFederationHealth/checkSelfUpgradeHealth above.
+  checks.push(await checkConferRlsFamilyCollision(engine));
+
   return computeDoctorReport(checks);
 }
 
@@ -2610,6 +2615,56 @@ export async function checkSourceRoutingHealth(engine: BrainEngine): Promise<Che
  * Single-source brain short-circuits to ok (no federation to check).
  * Each warning carries a paste-ready remediation hint.
  */
+
+/**
+ * [Confer overlay] "Never both RLS families" — see gbrain-upgrade-0.42.67 P1 §1/§1d (D4b).
+ * Upstream ships an opt-in app.scopes binding (GBRAIN_RLS_SCOPE_BINDING=1) with NO DDL;
+ * Confer's own gbrain.allowed_sources policies were deleted as dead code in the 0.42.67
+ * rebase (P1 §1c). Permissive Postgres policies OR together, so if BOTH ever exist at once,
+ * satisfying either GUC grants visibility — silent access widening. Fail loudly, never warn
+ * quietly. This queries the database directly (pg_policies), not any file on disk, so it
+ * remains a correct standing tripwire regardless of whether src/migrations/ exists — it is
+ * what actually enforces the invariant now that the file is gone. Shared by buildChecks()
+ * (local `gbrain doctor`) and doctorReportRemote() for cross-surface parity, matching every
+ * other check in this pair of functions.
+ */
+export async function checkConferRlsFamilyCollision(engine: BrainEngine): Promise<Check> {
+  try {
+    const bindingOn = process.env.GBRAIN_RLS_SCOPE_BINDING === '1';
+    const rows = await engine.executeRaw<{ n: string }>(
+      `SELECT count(*)::text AS n FROM pg_policies
+        WHERE tablename IN ('pages','content_chunks','links','take_proposals')`);
+    const policies = Number(rows[0]?.n ?? 0);
+    if (bindingOn && policies > 0) {
+      return {
+        name: 'confer_rls_family_collision',
+        status: 'fail',
+        message: `GBRAIN_RLS_SCOPE_BINDING=1 AND ${policies} row-level policies exist on the ` +
+          `core tables. Permissive policies are OR'd — this widens visibility silently. ` +
+          `Unset the env var or drop the policies; never run both.`,
+      };
+    }
+    if (bindingOn) {
+      return {
+        name: 'confer_rls_family_collision',
+        status: 'warn',
+        message: 'RLS scope binding enabled with no policies present (upstream-documented no-op).',
+      };
+    }
+    return {
+      name: 'confer_rls_family_collision',
+      status: 'ok',
+      message: `RLS scope binding off; ${policies} policies present.`,
+    };
+  } catch {
+    return {
+      name: 'confer_rls_family_collision',
+      status: 'warn',
+      message: 'Could not check RLS family collision (pg_policies query failed — likely PGLite or restricted permissions).',
+    };
+  }
+}
+
 export async function checkFederationHealth(engine: BrainEngine): Promise<Check> {
   try {
     const { loadAllSources } = await import('../core/sources-load.ts');
@@ -7688,6 +7743,10 @@ export async function buildChecks(
     // surfacing via the batch-retry audit JSONL. Codex H-9 thresholds.
     progress.heartbeat('batch_retry_health');
     checks.push(await checkBatchRetryHealth(engine));
+    // [Confer overlay] confer_rls_family_collision — see gbrain-upgrade-0.42.67 P1 §1d (D4b).
+    // Mirrored at doctorReportRemote() for cross-surface parity.
+    progress.heartbeat('confer_rls_family_collision');
+    checks.push(await checkConferRlsFamilyCollision(engine));
     // issue #1801 wedged_queue — alive-but-wedged worker (claimable work
     // waiting, zero live-lock active, stale completions) as a health error.
     progress.heartbeat('wedged_queue');
