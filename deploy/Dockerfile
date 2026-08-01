@@ -79,6 +79,9 @@ COPY pack.yaml /opt/confer/pack.yaml
 COPY src/core/operations.ts     /root/.bun/install/global/node_modules/gbrain/src/core/operations.ts
 COPY src/core/oauth-provider.ts /root/.bun/install/global/node_modules/gbrain/src/core/oauth-provider.ts
 COPY src/core/migrate.ts        /root/.bun/install/global/node_modules/gbrain/src/core/migrate.ts
+# confer_rls_family_collision doctor check (0.42.67 rebase, P1 §1d/D4b) — standing tripwire
+# for the "never both RLS families" invariant. Added 2026-07-31/08-01.
+COPY src/commands/doctor.ts     /root/.bun/install/global/node_modules/gbrain/src/commands/doctor.ts
 # world_knowledge feature (0.42) — these were MISSING from the overlay, so a
 # build without them shipped a brain with the world_knowledge CODE absent.
 # Added 2026-05-29 (sp1a-v13). The src/migrations/*.sql files are intentionally
