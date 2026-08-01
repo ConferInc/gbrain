@@ -135,6 +135,36 @@ describe('put_page empty-overwrite guard — allowed paths', () => {
     expect(page!.compiled_truth).toContain('Updated content.');
   });
 
+  // CONFER REGRESSION (P2 §3.10.5 finding, 2026-08-01). The guard did its existence lookup
+  // with the RAW slug while engine.putPage normalized via validateSlug() (lowercase). A
+  // case-variant slug therefore MISSED the lookup, the guard stayed silent, and the write
+  // then normalized and BLANKED the real page — the D-I1 clobber class the guard exists to
+  // prevent. Reproduced live on a prod clone before the fix. Both directions are pinned.
+  test('guard fires for a CASE-VARIANT slug (normalized lookup) and the page survives', async () => {
+    await seedPage('inbox/case-variant-guard');
+    await expect(
+      putPage.handler(makeCtx(), { slug: 'inbox/Case-Variant-GUARD', content: '   ' }),
+    ).rejects.toThrow(OperationError);
+    const page = await engine.getPage('inbox/case-variant-guard', { sourceId: 'default' });
+    expect(page!.compiled_truth).toContain('Content that must survive.');
+  });
+
+  test('case-variant slug with allow_empty still blanks the SAME (normalized) page, not a new one', async () => {
+    await seedPage('inbox/case-variant-allow');
+    const result = (await putPage.handler(makeCtx(), {
+      slug: 'inbox/Case-Variant-ALLOW',
+      content: '',
+      allow_empty: true,
+    })) as { status: string; slug: string };
+    expect(result.status).toBe('created_or_updated');
+    expect(result.slug).toBe('inbox/case-variant-allow');
+    // Exactly one row — the case variant must not have fabricated a second page.
+    const rows = await engine.executeRaw(
+      "SELECT slug FROM pages WHERE lower(slug) = 'inbox/case-variant-allow'",
+    );
+    expect((rows as unknown as unknown[]).length).toBe(1);
+  });
+
   test('guard is scoped to the write-target source — a non-empty page in another source does not block', async () => {
     await seedPage('shared/per-source'); // lands in 'default'
     await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('team-x', 'team-x')");

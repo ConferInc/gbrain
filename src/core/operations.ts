@@ -7,6 +7,7 @@ import { lstatSync, realpathSync } from 'fs';
 import { resolve, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
+import { validateSlug } from './utils.ts';
 import type { GBrainConfig } from './config.ts';
 import type { PageType } from './types.ts';
 import { importFromContent } from './import-file.ts';
@@ -923,7 +924,13 @@ const put_page: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    const slug = p.slug as string;
+    // CONFER FIX (P2 §3.10.5 finding, 2026-08-01): normalize the slug HERE, with the same
+    // validateSlug() the write path (`engine.putPage`) applies. The empty-overwrite guard
+    // below does an existence lookup by this slug; when the guard used the RAW slug while
+    // putPage lowercased it, a case-variant slug ('Foo' vs 'foo') missed the lookup, the
+    // guard did not fire, and the write then normalized and BLANKED the real page — the
+    // exact D-I1 clobber class the guard exists to prevent. Proven on the staging clone.
+    const slug = validateSlug(p.slug as string);
 
     // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
     // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
