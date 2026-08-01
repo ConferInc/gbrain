@@ -266,19 +266,19 @@ describe('rescopeClient', () => {
 
     const authInfo = await provider.verifyAccessToken(tokens.access_token) as unknown as CoreAuthInfo;
     expect(authInfo.sourceId).toBe('wiki');
-    // [RT5-FREEZE P1 Step 7 fix] This is upstream's own new test (rescopeClient, #1914),
-    // written without the Confer fork's pre-existing federated-union behavior in
-    // verifyAccessToken (P1 §4.2): for any source-scoped (non-admin) client, allowedSources
-    // is additionally unioned with every PUBLIC (federated:true) source on the brain. This
-    // test's shared DB seeds 'default' as federated:true (see
-    // test/local-federated-search-scope.test.ts's own comment: "Seeded 'default' source is
-    // federated=true"), so a rescoped client's allowedSources correctly includes it here —
-    // this is intentional fork behavior, not a regression, and predates this rebase. Assert
-    // the explicitly-granted sources are present rather than exact array equality, so this
-    // test doesn't re-couple to which OTHER sources happen to be globally federated in the
-    // shared test fixture.
-    expect(authInfo.allowedSources).toEqual(expect.arrayContaining(['wiki', 'essays']));
-    expect(authInfo.allowedSources).toContain('default'); // federated-union of the seeded public source
+    // [RT5-FREEZE P1 Step 7 fix, tightened per P1 gap-closing Codex re-gate] This is
+    // upstream's own new test (rescopeClient, #1914), written without the Confer fork's
+    // pre-existing federated-union behavior in verifyAccessToken (P1 §4.2): for any
+    // source-scoped (non-admin) client, allowedSources is additionally unioned with every
+    // PUBLIC (federated:true) source on the brain. This file loads its own file-local DB via
+    // PGLITE_SCHEMA_SQL (not the shared fixture in test/local-federated-search-scope.test.ts),
+    // which deterministically seeds exactly one federated:true source, 'default'
+    // (src/core/pglite-schema.ts) — so the federated-union result here is a fixed,
+    // fully-known set, not merely a superset. Assert EXACT equality (not
+    // expect.arrayContaining + a separate toContain, which would silently pass if an
+    // unexpected extra source ever leaked into the union) so this test still fails loudly if
+    // the federated-union implementation starts unioning in sources it should not.
+    expect(authInfo.allowedSources).toEqual(['wiki', 'essays', 'default']);
   });
 
   test('partial rescope leaves the other axis untouched', async () => {
