@@ -175,10 +175,22 @@ describe('op-layer capture — query', () => {
     expect(rows).toHaveLength(0);
   });
 
-  test('explicit source_id overrides ctx.sourceId for query retrieval', async () => {
+  test('explicit source_id overrides ctx.sourceId for query retrieval (when authorized)', async () => {
+    // This test predates operations.ts's resolveReadScope authorization fix
+    // (see its docstring: "Closes the explicit-source authorization bypass —
+    // a remote, source-scoped client passing source_id: X was previously
+    // honored with {sourceId: X} UNCHECKED"). An unauthorized override now
+    // correctly throws permission_denied (covered by
+    // test/cross-source-scope-authz.test.ts). This test's actual intent —
+    // a client explicitly authorized to read `testsrc` gets testsrc-scoped
+    // results even though its default ctx.sourceId is `default` — needs
+    // `ctx.auth.allowedSources` set, matching the pattern in
+    // test/calibration-cli.test.ts, or resolveReadScope rejects it at
+    // operations.ts:474 before the query ever runs.
     const ctx = makeCtx({
       sourceId: 'default',
       config: makeConfig({ capture: false }),
+      auth: { allowedSources: ['testsrc'] } as never,
     });
 
     const results = await queryOp.handler(ctx, {

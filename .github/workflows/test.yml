@@ -2,9 +2,9 @@ name: Test
 
 on:
   push:
-    branches: [master]
+    branches: [confer/main]
   pull_request:
-    branches: [master]
+    branches: [confer/main]
 
 permissions:
   contents: read
