@@ -731,6 +731,21 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   'minion_jobs.budget_remaining_cents',
   'minion_jobs.budget_owner_job_id',
   'minion_jobs.budget_root_owner_id',
+  // Confer fork spec §6.4 — take_proposals.world_consensus (nightly-cached
+  // value of the confer_world_consensus view) + take_proposals.relayed_by
+  // (Sherpa-style relay, distinct from acted_by), and pages.schema_pack_version.
+  // None of the three appear in PGLITE_SCHEMA_SQL — verified by grep, zero
+  // hits in either a CREATE TABLE body or a CREATE INDEX. Same exemption
+  // rationale as the entries above: fresh installs replay the schema blob
+  // (which doesn't know about these columns), then the migration's own
+  // `ADD COLUMN IF NOT EXISTS` adds them; pre-existing brains get the same
+  // ALTER on upgrade. The migration also creates `pages_pack_version_idx`
+  // ON pages(schema_pack_version) — that index lives INSIDE the same
+  // migration as the column, not in the schema blob, so there is no
+  // forward-reference for the blob's replay to trip over.
+  'take_proposals.world_consensus',
+  'take_proposals.relayed_by',
+  'pages.schema_pack_version',
 ]);
 
 test('every ALTER TABLE ADD COLUMN in MIGRATIONS is covered by applyForwardReferenceBootstrap (column-only class)', async () => {
